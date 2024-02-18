@@ -4,7 +4,7 @@ import torch.nn as nn
 from datasets import load_dataset, Dataset
 import requests
 import PyPDF2
-
+from torch.utils.data import DataLoader
 # 下载 PDF 文件
 url = "https://img.tdcktz.com/jsq/bp.pdf"
 response = requests.get(url)
@@ -31,17 +31,29 @@ business_plan_data = {
 import json
 with open("business_plan_dataset.json", "w") as f:
     json.dump(business_plan_data, f)
-# 加载商业计划书数据集（示例）
-# business_plan_dataset = load_dataset("./business_plan_dataset.json")
-business_plan_dataset = Dataset.from_dict({"text": [business_plan_text]})
 
+# 加载商业计划书数据集（示例）
+business_plan_dataset = Dataset.from_dict({"text": [business_plan_text]})
 
 # 加载BERT tokenizer
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
 # 准备数据集
+# def tokenize_function(example):
+#     return tokenizer(example['text'], padding='max_length', truncation=True)
+
 def tokenize_function(example):
-    return tokenizer(example['text'], padding='max_length', truncation=True)
+    # 使用 tokenizer 编码文本
+    inputs = tokenizer(example['text'], padding='max_length', truncation=True)
+    # 将编码后的文本添加到 example 中
+    example['input_ids'] = inputs['input_ids']
+    example['token_type_ids'] = inputs['token_type_ids']
+    example['attention_mask'] = inputs['attention_mask']
+    # 如果您的数据集中有标签，可以将标签添加到 example 中
+    # 如果没有标签，可以根据具体情况修改这部分逻辑
+    if 'label' in example:
+        example['label'] = torch.tensor(example['label'])
+    return example
 
 tokenized_datasets = business_plan_dataset.map(tokenize_function, batched=True)
 
@@ -56,12 +68,35 @@ class CustomModel(nn.Module):
         logits = self.classifier(outputs.last_hidden_state[:, 0, :])  # 取CLS token的输出作为分类结果
         if labels is not None:
             loss_fn = nn.CrossEntropyLoss()
+            # 计算损失
             loss = loss_fn(logits, labels)
             return loss
         return logits
 
-# 加载BERT模型及分类头部
+# 损失函数
+def compute_loss(model_output, labels):
+    # 计算交叉熵损失
+    loss_fn = nn.CrossEntropyLoss()
+    loss = loss_fn(model_output, labels)
+    return loss
+
+num_epochs = 3  # 训练迭代次数
+# 模型
 model = CustomModel(num_labels=3)
+# 创建数据加载器
+train_loader = DataLoader(tokenized_datasets, batch_size=8, shuffle=True)
+# 优化器
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+# 训练循环
+for epoch in range(num_epochs):
+    for batch in train_loader:
+        input_ids, token_type_ids, attention_mask, labels = batch
+        optimizer.zero_grad()
+        model_output = model(input_ids, token_type_ids, attention_mask)
+        loss = compute_loss(model_output, labels)
+        loss.backward()
+        optimizer.step()
+
 
 # 设置训练参数
 training_args = TrainingArguments(
@@ -89,6 +124,9 @@ trainer.train()
 # 保存微调后的模型
 trainer.save_model("./business_plan_innovation_model")
 
+# 加载测试集
+test_dataset = tokenized_datasets["test"]
+
 # 在测试集上评估微调后的模型
-eval_results = trainer.evaluate(tokenized_datasets["test"])
+eval_results = trainer.evaluate(test_dataset)
 print("Evaluation Results:", eval_results)
